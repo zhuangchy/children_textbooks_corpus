@@ -3,3 +3,4 @@ jieba
 pandas
 openpyxl
 xlsxwriter
+pypinyin

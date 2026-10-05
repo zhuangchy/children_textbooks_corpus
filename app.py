@@ -64,7 +64,11 @@ def backup_database(db_path: Path) -> None:
 
 def ensure_token_columns(conn: sqlite3.Connection) -> None:
     """
-    若 tokens 表缺少 is_polysemy / word_semantics / context_tag 字段，自动迁移添加。
+    若数据库缺少网站使用的兼容字段，自动迁移添加。
+
+    新版语料库使用 is_poly 保存多义词标记；迁移到网站结构时同步到
+    is_polysemy，并将 progress_score 同步为旧界面使用的 absolute_level，
+    避免数据库更新后丢失已有标注或排序信息。
     """
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(tokens);")
@@ -74,12 +78,23 @@ def ensure_token_columns(conn: sqlite3.Connection) -> None:
         cur.execute(
             "ALTER TABLE tokens ADD COLUMN is_polysemy INTEGER NOT NULL DEFAULT 0;"
         )
+        if "is_poly" in cols:
+            cur.execute("UPDATE tokens SET is_polysemy = is_poly;")
+    if "semantic_tag" not in cols:
+        cur.execute("ALTER TABLE tokens ADD COLUMN semantic_tag TEXT;")
     if "word_semantics" not in cols:
         cur.execute("ALTER TABLE tokens ADD COLUMN word_semantics TEXT;")
     if "context_tag" not in cols:
         cur.execute("ALTER TABLE tokens ADD COLUMN context_tag TEXT;")
     if "word_semantics_json" not in cols:
         cur.execute("ALTER TABLE tokens ADD COLUMN word_semantics_json TEXT;")
+
+    cur.execute("PRAGMA table_info(texts);")
+    text_cols = {row["name"] for row in cur.fetchall()}
+    if "absolute_level" not in text_cols:
+        cur.execute("ALTER TABLE texts ADD COLUMN absolute_level INTEGER;")
+        if "progress_score" in text_cols:
+            cur.execute("UPDATE texts SET absolute_level = progress_score;")
 
     conn.commit()
 

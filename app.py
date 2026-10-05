@@ -1342,34 +1342,36 @@ def main() -> None:
     ).set_index("学科")
     st.bar_chart(chart_df, color="#3B82F6", height=320)
 
-    for label in DISPLAY_SUBJECTS:
-        examples = sorted(
-            grouped[label],
-            key=lambda row: (
-                int(row["grade"]),
-                int(row["term"]),
-                int(row["absolute_level"]),
-                str(row["version"]),
-                int(row["sentence_index"]),
-            ),
-        )
-        if not examples:
-            continue
+    subject_tabs = st.tabs(DISPLAY_SUBJECTS)
+    for tab, label in zip(subject_tabs, DISPLAY_SUBJECTS):
+        with tab:
+            examples = sorted(
+                grouped[label],
+                key=lambda row: (
+                    int(row["grade"]),
+                    int(row["term"]),
+                    int(row["absolute_level"]),
+                    str(row["version"]),
+                    int(row["sentence_index"]),
+                ),
+            )
+            if not examples:
+                st.caption("该学科下暂无例句。")
+                continue
 
-        st.subheader(label)
-        for row in examples:
-            term_text = "上册" if int(row["term"]) == 1 else "下册"
-            title = row["title"] or "未标注篇名"
-            metadata = (
-                f"{int(row['grade'])}年级{term_text} · "
-                f"{row['version']}版 · 《{title}》"
-            )
-            highlighted = highlight_word_html(row["content"], query)
-            st.markdown(
-                f'<div class="example-card"><small style="color:#667085">{metadata}</small><br>'
-                f'<span>{highlighted}</span></div>',
-                unsafe_allow_html=True,
-            )
+            for row in examples:
+                term_text = "上册" if int(row["term"]) == 1 else "下册"
+                title = row["title"] or "未标注篇名"
+                metadata = (
+                    f"{int(row['grade'])}年级{term_text} · "
+                    f"{row['version']}版 · 《{title}》"
+                )
+                highlighted = highlight_word_html(row["content"], query)
+                st.markdown(
+                    f'<div class="example-card"><small style="color:#667085">{metadata}</small><br>'
+                    f'<span>{highlighted}</span></div>',
+                    unsafe_allow_html=True,
+                )
 
 
 if __name__ == "__main__":

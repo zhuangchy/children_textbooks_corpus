@@ -1,3 +1,5 @@
+import difflib
+import html
 import json
 import os
 import re
@@ -13,9 +15,6 @@ from pypinyin import Style, lazy_pinyin
 
 
 def _is_streamlit_cloud() -> bool:
-    """
-    判断是否运行在 Streamlit Community Cloud。
-    """
     return bool(os.getenv("STREAMLIT_SHARING_MODE"))
 
 
@@ -1185,6 +1184,192 @@ def main() -> None:
                             if ok:
                                 goto_next_word()
                             st.rerun()
+
+
+DISPLAY_SUBJECTS = ["道法", "科学", "数学", "语文"]
+
+
+@st.cache_data(ttl=3600)
+def get_nearby_words(db_path_str: str, query: str, limit: int = 6) -> List[str]:
+    """按共同汉字、首尾字、字形相似度和词频推荐临近词。"""
+    query = query.strip()
+    if not query:
+        return []
+
+    chars = list(dict.fromkeys(query))
+    clauses = " OR ".join("word LIKE ?" for _ in chars)
+    params = [f"%{char}%" for char in chars]
+    conn = sqlite3.connect(db_path_str)
+    rows = conn.execute(
+        f"""
+        SELECT word, COUNT(*) AS frequency
+        FROM tokens
+        WHERE word != ? AND ({clauses})
+        GROUP BY word
+        LIMIT 5000
+        """,
+        [query, *params],
+    ).fetchall()
+    conn.close()
+
+    def score(item: Tuple[str, int]) -> Tuple[float, int, int]:
+        word, frequency = item
+        shared = len(set(query) & set(word))
+        relation = 5.0 if word in query or query in word else 0.0
+        boundary = 0.0
+        if word.startswith(query[-1]):
+            boundary += 4.0
+        if word.endswith(query[-1]):
+            boundary += 3.0
+        if word.startswith(query[0]):
+            boundary += 0.5
+        same_length = 2.0 if len(query) == len(word) else 0.0
+        similarity = difflib.SequenceMatcher(None, query, word).ratio() * 4.0
+        length_penalty = abs(len(query) - len(word)) * 1.5
+        return (
+            shared * 2.0 + relation + boundary + same_length + similarity - length_penalty,
+            frequency,
+            -len(word),
+        )
+
+    ranked = sorted(rows, key=score, reverse=True)
+    return [word for word, _ in ranked[:limit]]
+
+
+def choose_suggestion(word: str) -> None:
+    st.session_state.search_input_clean = word
+    st.session_state.active_query = word
+
+
+def highlight_word_html(content: str, word: str) -> str:
+    safe_content = html.escape(content)
+    safe_word = html.escape(word)
+    return safe_content.replace(
+        safe_word,
+        f'<mark style="background:#dbeafe;color:#1d4ed8;padding:0 0.15rem;border-radius:0.2rem">{safe_word}</mark>',
+    )
+
+
+def main() -> None:
+    st.set_page_config(
+        page_title="小学教材语料库词汇检索",
+        page_icon="📚",
+        layout="wide",
+        initial_sidebar_state="collapsed",
+    )
+    st.markdown(
+        """
+        <style>
+            #MainMenu, header, footer, [data-testid="stElementToolbar"] {display: none;}
+            .block-container {max-width: 1080px; padding-top: 2.5rem; padding-bottom: 3rem;}
+            h1 {text-align: center; margin-bottom: 1.6rem;}
+            [data-testid="stForm"] {border: 0; padding: 0;}
+            [data-testid="stFormSubmitButton"] button {height: 2.5rem; width: 100%;}
+            .example-card {
+                padding: 0.85rem 1rem;
+                margin: 0.55rem 0;
+                border: 1px solid #e7e9ee;
+                border-radius: 0.65rem;
+                background: #ffffff;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.title("小学教材语料库词汇检索")
+
+    if not DEFAULT_DB_PATH.exists():
+        st.error("语料库暂时无法读取，请稍后再试。")
+        return
+
+    conn = get_connection(DEFAULT_DB_PATH)
+    ensure_token_columns(conn)
+    ensure_indexes(conn)
+
+    with st.form("word_search_form"):
+        search_col, button_col = st.columns([8, 1.35], vertical_alignment="bottom")
+        with search_col:
+            search_word = st.text_input(
+                "检索词",
+                placeholder="请输入要检索的词汇",
+                key="search_input_clean",
+                label_visibility="collapsed",
+            )
+        with button_col:
+            submitted = st.form_submit_button("检索", type="primary", use_container_width=True)
+
+    if submitted:
+        st.session_state.active_query = search_word.strip()
+
+    query = st.session_state.get("active_query", "").strip()
+    if not query:
+        return
+
+    rows = search_by_word(conn, query)
+    if not rows:
+        st.warning(f"“{query}”该词不在库中。")
+        suggestions = get_nearby_words(str(DEFAULT_DB_PATH), query)
+        if suggestions:
+            st.caption("你可能想检索：")
+            suggestion_cols = st.columns(len(suggestions))
+            for col, suggestion in zip(suggestion_cols, suggestions):
+                with col:
+                    st.button(
+                        suggestion,
+                        key=f"suggest_{query}_{suggestion}",
+                        use_container_width=True,
+                        on_click=choose_suggestion,
+                        args=(suggestion,),
+                    )
+        return
+
+    subject_counts = {label: 0 for label in DISPLAY_SUBJECTS}
+    grouped: Dict[str, List[Dict[str, Any]]] = {
+        label: [] for label in DISPLAY_SUBJECTS
+    }
+    seen_sentences: Set[int] = set()
+    for row in rows:
+        label = SUBJECT_LABELS.get(row["subject"], row["subject"])
+        if label not in grouped:
+            continue
+        subject_counts[label] += 1
+        if row["sentence_id"] not in seen_sentences:
+            grouped[label].append(row)
+            seen_sentences.add(row["sentence_id"])
+
+    chart_df = pd.DataFrame(
+        {"学科": DISPLAY_SUBJECTS, "出现次数": [subject_counts[x] for x in DISPLAY_SUBJECTS]}
+    ).set_index("学科")
+    st.bar_chart(chart_df, color="#3B82F6", height=320)
+
+    for label in DISPLAY_SUBJECTS:
+        examples = sorted(
+            grouped[label],
+            key=lambda row: (
+                int(row["grade"]),
+                int(row["term"]),
+                int(row["absolute_level"]),
+                str(row["version"]),
+                int(row["sentence_index"]),
+            ),
+        )
+        if not examples:
+            continue
+
+        st.subheader(label)
+        for row in examples:
+            term_text = "上册" if int(row["term"]) == 1 else "下册"
+            title = row["title"] or "未标注篇名"
+            metadata = (
+                f"{int(row['grade'])}年级{term_text} · "
+                f"{row['version']}版 · 《{title}》"
+            )
+            highlighted = highlight_word_html(row["content"], query)
+            st.markdown(
+                f'<div class="example-card"><small style="color:#667085">{metadata}</small><br>'
+                f'<span>{highlighted}</span></div>',
+                unsafe_allow_html=True,
+            )
 
 
 if __name__ == "__main__":
